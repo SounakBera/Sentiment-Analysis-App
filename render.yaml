@@ -1,9 +1,11 @@
+# render.yaml - blueprint for a single Streamlit web service on Render
 services:
   - type: web
     name: sentiment-streamlit
     env: python
     region: oregon
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run app.py --server.port $PORT --server.headless true
     branch: main
+    buildCommand: pip install -r requirements.txt
+    # Use Streamlit start command that reads Render's $PORT
+    startCommand: streamlit run app.py --server.port $PORT --server.headless true
