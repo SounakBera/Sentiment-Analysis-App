@@ -1,5 +1,7 @@
-streamlit==1.28.0
+streamlit
 pandas
+numpy
 yfinance
 vaderSentiment
-matplotlib
+plotly
+scikit-learn
