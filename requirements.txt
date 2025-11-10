@@ -1,7 +1,10 @@
-streamlit
+flask
+gunicorn
 pandas
 numpy
+matplotlib
+requests
+beautifulsoup4
 yfinance
-vaderSentiment
-plotly
+nltk
 scikit-learn
