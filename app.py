@@ -1,275 +1,304 @@
-# app.py
-import streamlit as st
+import os
 import pandas as pd
 import numpy as np
-import datetime
+import matplotlib
+matplotlib.use('Agg') # Use 'Agg' backend for server-side rendering
+import matplotlib.pyplot as plt
+import requests
+from bs4 import BeautifulSoup
 import yfinance as yf
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-import plotly.express as px
-import plotly.graph_objects as go
+import nltk
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score
+import io
+import base64
 
-st.set_page_config(page_title="Sentiment → Stock (Graphs)", layout="wide")
-st.title("📈 Sentiment vs Stock — Interactive Visuals (Render-ready)")
+from flask import Flask, request, render_template_string
 
-# -------------------------
-# Sidebar inputs
-# -------------------------
-st.sidebar.header("Inputs")
-ticker = st.sidebar.text_input("Ticker (e.g. AAPL)", "AAPL").upper()
-start_date = st.sidebar.date_input("Start date", datetime.date.today() - datetime.timedelta(days=180))
-end_date = st.sidebar.date_input("End date", datetime.date.today())
-use_sample = st.sidebar.checkbox("Use sample headlines (demo)", True)
+# --- NLTK Setup ---
+# This will be run when the app starts.
+# On Render, you'll add this to your build command.
+try:
+    nltk.data.find('sentiment/vader_lexicon.zip')
+except LookupError:
+    nltk.download('vader_lexicon')
 
-# -------------------------
-# Helper functions for robust merge
-# -------------------------
-def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    If df has MultiIndex columns, flatten them into single-level strings joined by '_'.
-    Otherwise return df unchanged.
-    """
-    if isinstance(df.columns, pd.MultiIndex):
-        df = df.copy()
-        new_cols = []
-        for col in df.columns:
-            # col is a tuple
-            parts = [str(c) for c in col if (c is not None and str(c) != "")]
-            new_cols.append("_".join(parts) if parts else "")
-        df.columns = new_cols
-    return df
+# --- Initialize Flask App ---
+app = Flask(__name__)
+sia = SentimentIntensityAnalyzer()
 
-def ensure_date_column(df: pd.DataFrame, col: str = "date") -> pd.DataFrame:
-    """
-    Make sure 'col' exists as a column, not just an index level.
-    Normalize to Python date objects where possible.
-    """
-    df = df.copy()
-    # If date is index and named, reset it
-    if isinstance(df.index, pd.MultiIndex):
-        df = df.reset_index()
+# --- Helper Functions (from your notebook) ---
+
+def fetch_stock_data(ticker):
+    """Fetches 1-year historical price data."""
+    stock = yf.Ticker(ticker)
+    df_price = stock.history(period="1y", interval="1d")
+    if df_price.empty:
+        raise ValueError(f"Could not fetch stock data for {ticker}. Is the symbol correct?")
+    df_price.reset_index(inplace=True)
+    df_price = df_price[['Date', 'Close']]
+    df_price['Date'] = pd.to_datetime(df_price['Date']).dt.date
+    return df_price
+
+def fetch_headlines(ticker):
+    """Scrapes news headlines from Finviz."""
+    url = f"https://finviz.com/quote.ashx?t={ticker}"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    response = requests.get(url, headers=headers)
+    response.raise_for_status() # Raise an error for bad responses
+    soup = BeautifulSoup(response.content, "html.parser")
+    
+    news_table = soup.find('table', class_='fullview-news-outer')
+    data = []
+    if not news_table:
+        raise ValueError(f"Could not find news table for {ticker}. Finviz layout may have changed.")
+        
+    for row in news_table.find_all('tr'):
+        cols = row.find_all('td')
+        if len(cols) == 2:
+            timestamp = cols[0].text.strip()
+            headline_tag = cols[1].a
+            if headline_tag:
+                headline = headline_tag.text.strip()
+                if " " in timestamp:
+                    date_str, time_str = timestamp.split(" ", 1) # Split only on first space
+                else:
+                    date_str, time_str = None, timestamp
+                data.append({"Date": date_str, "Time": time_str, "Headline": headline})
+
+    if not data:
+        raise ValueError(f"No headlines found for {ticker}.")
+
+    df_news = pd.DataFrame(data)
+    df_news['Date'] = df_news['Date'].fillna(method='ffill')
+    df_news['Date'] = pd.to_datetime(df_news['Date'], format='%b-%d-%y').dt.date
+    return df_news
+
+def analyze_and_merge(df_price, df_news):
+    """Performs sentiment analysis and merges with price data."""
+    df_news['Sentiment'] = df_news['Headline'].apply(lambda x: sia.polarity_scores(x)['compound'])
+    df_daily_sentiment = df_news.groupby('Date').agg({'Sentiment': 'mean'}).reset_index()
+    
+    df_merged = pd.merge(df_price, df_daily_sentiment, on='Date', how='left')
+    df_merged['Sentiment'] = df_merged['Sentiment'].fillna(0)
+    df_merged['NextDay_PctChange'] = df_merged['Close'].pct_change().shift(-1)
+    
+    # Calculate correlation
+    data_for_corr = df_merged.dropna()
+    if not data_for_corr.empty:
+        correlation = data_for_corr['Sentiment'].corr(data_for_corr['NextDay_PctChange'])
     else:
-        if col not in df.columns and df.index.name is not None:
-            # reset index to bring it into columns
-            df = df.reset_index()
-    # Normalize date column to datetime.date if present
-    if col in df.columns:
-        try:
-            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
-        except Exception:
-            df[col] = df[col].astype(str)
-    return df
+        correlation = 0
+        
+    return df_merged, correlation, df_news[['Date', 'Time', 'Headline', 'Sentiment']]
 
-# -------------------------
-# Upload / parse headlines
-# -------------------------
-st.markdown("## Provide headlines")
-st.markdown("Upload CSV with columns `date,headline` OR paste headlines one per line in `YYYY-MM-DD|headline` format.")
+def run_regression(df_merged):
+    """Runs a simple linear regression and returns R2 score."""
+    data = df_merged.dropna()
+    if len(data) < 2:
+        return 0 # Not enough data to run regression
+        
+    X = data[['Sentiment']]
+    y = data['NextDay_PctChange']
+    
+    if len(data) < 5: # Avoid splitting if too little data
+        X_train, X_test, y_train, y_test = X, X, y, y
+    else:
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    r2 = r2_score(y_test, y_pred)
+    return r2
 
-uploaded = st.file_uploader("Upload CSV (date,headline)", type=["csv"])
-headlines_df = None
+def create_plots(df_merged, ticker):
+    """Creates plots and returns them as base64 encoded strings."""
+    plots_base64 = []
 
-if uploaded:
+    # --- Plot 1: Correlation Scatter Plot ---
     try:
-        df = pd.read_csv(uploaded)
-        # try common alternate column names and standardize to 'headline'
-        if "headline" not in df.columns:
-            for alt in ["Headline", "title", "Title", "text", "Text"]:
-                if alt in df.columns:
-                    df = df.rename(columns={alt: "headline"})
-                    break
-        if "headline" not in df.columns:
-            st.error("CSV must have a `headline` column (or rename a column to 'headline').")
+        data_for_plot = df_merged.dropna()
+        if not data_for_plot.empty:
+            fig1, ax1 = plt.subplots(figsize=(8, 6))
+            ax1.scatter(data_for_plot['Sentiment'], data_for_plot['NextDay_PctChange'], alpha=0.6)
+            ax1.set_title(f"Sentiment vs. Next-Day % Change ({ticker})")
+            ax1.set_xlabel("Daily Sentiment Score")
+            ax1.set_ylabel("Next-Day % Price Change")
+            ax1.grid(True)
+            
+            buf1 = io.BytesIO()
+            fig1.savefig(buf1, format="png")
+            buf1.seek(0)
+            plots_base64.append(base64.b64encode(buf1.read()).decode('ascii'))
+            plt.close(fig1)
         else:
-            if "date" in df.columns:
-                df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-            else:
-                df["date"] = pd.NaT
-            headlines_df = df[["date", "headline"]].copy()
+            plots_base64.append(None) # Add placeholder if no data
     except Exception as e:
-        st.error(f"Error reading CSV: {e}")
+        print(f"Error creating plot 1: {e}")
+        plots_base64.append(None)
 
-# sample fallback
-if headlines_df is None and use_sample:
-    sample = [
-        ("2025-09-10", "Apple reports strong quarterly revenue growth"),
-        ("2025-09-12", "CEO resigns unexpectedly"),
-        ("2025-09-20", "New product line announced, analysts optimistic"),
-        ("2025-10-01", "Regulatory fine imposed over minor compliance lapse"),
-        ("2025-10-15", "Rumors of strategic acquisition boost investor sentiment"),
-    ]
-    headlines_df = pd.DataFrame(sample, columns=["date", "headline"])
-    headlines_df["date"] = pd.to_datetime(headlines_df["date"]).dt.date
-
-# paste area (overrides sample if provided)
-pasted = st.text_area("Or paste headlines (YYYY-MM-DD|headline per line)", height=140)
-if pasted.strip():
-    lines = [l.strip() for l in pasted.splitlines() if l.strip()]
-    parsed = []
-    for line in lines:
-        if "|" in line:
-            d, text = line.split("|", 1)
-            try:
-                d_parsed = pd.to_datetime(d, errors="coerce").date()
-                d_val = d_parsed if pd.notna(d_parsed) else None
-            except Exception:
-                d_val = None
-            parsed.append({"date": d_val, "headline": text.strip()})
-        else:
-            parsed.append({"date": None, "headline": line})
-    headlines_df = pd.DataFrame(parsed)
-    if "date" in headlines_df.columns:
-        headlines_df["date"] = headlines_df["date"].apply(lambda x: pd.to_datetime(x, errors="coerce").date() if pd.notna(x) else None)
-
-if headlines_df is None or headlines_df.empty:
-    st.warning("No headlines provided yet. Use sample, upload a CSV, or paste headlines.")
-    st.stop()
-
-# -------------------------
-# Score headlines (VADER)
-# -------------------------
-analyzer = SentimentIntensityAnalyzer()
-
-def score_text(s: str) -> float:
+    # --- Plot 2: Time Series Plot ---
     try:
-        return analyzer.polarity_scores(str(s))["compound"]
-    except Exception:
-        return 0.0
+        fig2, ax2 = plt.subplots(figsize=(12, 6))
+        ax2.plot(df_merged['Date'], df_merged['Close'], label='Stock Price', linewidth=2)
+        # Scale sentiment to be visible with price
+        sentiment_scaled = df_merged['Sentiment'] * (df_merged['Close'].mean() * 0.1) + df_merged['Close'].mean()
+        ax2.plot(df_merged['Date'], sentiment_scaled, label='Sentiment (scaled & centered)', linestyle='--')
+        
+        ax2.set_title(f"{ticker} — Stock Price vs. News Sentiment")
+        ax2.set_xlabel("Date")
+        ax2.set_ylabel("Price / Scaled Sentiment")
+        ax2.legend()
+        ax2.grid(True)
+        
+        buf2 = io.BytesIO()
+        fig2.savefig(buf2, format="png")
+        buf2.seek(0)
+        plots_base64.append(base64.b64encode(buf2.read()).decode('ascii'))
+        plt.close(fig2)
+    except Exception as e:
+        print(f"Error creating plot 2: {e}")
+        plots_base64.append(None)
 
-headlines_df = headlines_df.copy()
-headlines_df["score"] = headlines_df["headline"].apply(score_text)
-# Fill missing dates with start_date so headlines without dates map somewhere
-headlines_df["date"] = headlines_df["date"].apply(lambda x: x if (x is not None and not pd.isna(x)) else start_date)
+    return plots_base64
 
-# Aggregate daily sentiment
-daily_sentiment = headlines_df.groupby("date", as_index=False).agg(
-    avg_score=("score", "mean"),
-    count=("score", "size")
-).sort_values("date")
+# --- HTML Template String ---
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Sentiment Analyzer</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; background-color: #f4f7f6; color: #333; margin: 0; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; background: #fff; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        header { padding: 30px; border-bottom: 1px solid #e0e0e0; text-align: center; }
+        header h1 { margin: 0; color: #1a73e8; }
+        header p { margin: 5px 0 0; font-size: 1.1em; color: #5f6368; }
+        main { padding: 30px; }
+        form { display: flex; gap: 10px; margin-bottom: 30px; }
+        input[type="text"] { flex-grow: 1; padding: 12px; font-size: 1em; border: 1px solid #ddd; border-radius: 4px; }
+        button { padding: 12px 20px; font-size: 1em; background-color: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; transition: background-color 0.3s; }
+        button:hover { background-color: #185abc; }
+        .results { border-top: 1px solid #e0e0e0; padding-top: 20px; }
+        h2 { color: #1a73e8; border-bottom: 2px solid #1a73e8; padding-bottom: 5px; }
+        .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; background: #f9f9f9; padding: 20px; border-radius: 4px; margin-bottom: 20px; }
+        .stat p { margin: 0; font-size: 1.1em; color: #333; }
+        .stat p strong { font-size: 1.4em; color: #185abc; display: block; margin-top: 4px; }
+        .plot img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; margin-top: 10px; }
+        .error { background: #fdecea; color: #a94442; padding: 15px; border: 1px solid #f5c6cb; border-radius: 4px; }
+        table { border-collapse: collapse; width: 100%; margin-top: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        th, td { text-align: left; padding: 12px; border-bottom: 1px solid #ddd; }
+        th { background-color: #f4f7f6; }
+        tr:nth-child(even) { background-color: #fdfdfd; }
+        tr:hover { background-color: #f1f1f1; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Stock News Sentiment Analyzer</h1>
+            <p>Enter a stock ticker (e.g., AAPL, MSFT, GOOG) to analyze market sentiment.</p>
+        </header>
+        <main>
+            <form action="/" method="POST">
+                <input type="text" name="ticker" placeholder="Enter Ticker Symbol" required>
+                <button type="submit">Analyze</button>
+            </form>
 
-# -------------------------
-# Fetch price data
-# -------------------------
-try:
-    hist = yf.download(ticker, start=start_date - datetime.timedelta(days=7), end=end_date + datetime.timedelta(days=1), progress=False)
-    if hist.empty:
-        st.error("No price data found for ticker. Check ticker symbol or date range.")
-        st.stop()
-    hist = hist.reset_index()
-    # ensure plain column name 'date'
-    hist["date"] = pd.to_datetime(hist["Date"]).dt.date
-    prices = hist[["date", "Close", "Volume"]].rename(columns={"Close": "close"})
-except Exception as e:
-    st.error(f"Error fetching prices: {e}")
-    st.stop()
+            {% if error %}
+                <div class="error">
+                    <strong>Error:</strong> {{ error }}
+                </div>
+            {% endif %}
 
-# -------------------------
-# Flatten and normalize before merge (fixes MultiIndex MergeError)
-# -------------------------
-prices = flatten_columns(prices)
-daily_sentiment = flatten_columns(daily_sentiment)
+            {% if results %}
+                <div class="results">
+                    <h2>Analysis for ${{ results.ticker }}</h2>
+                    
+                    <div class="stats">
+                        <div class="stat">
+                            <p>Correlation (Sentiment vs. Next-Day % Change)
+                                <strong>{{ "%.4f"|format(results.correlation) }}</strong>
+                            </p>
+                        </div>
+                        <div class="stat">
+                            <p>R² Score (Linear Regression)
+                                <strong>{{ "%.4f"|format(results.r2) }}</strong>
+                            </p>
+                        </div>
+                    </div>
 
-prices = ensure_date_column(prices, col="date")
-daily_sentiment = ensure_date_column(daily_sentiment, col="date")
+                    <div class="plot">
+                        <h2>Price vs. Sentiment Time Series</h2>
+                        {% if results.plot_timeseries %}
+                            <img src="data:image/png;base64,{{ results.plot_timeseries }}">
+                        {% else %}
+                            <p>Time series plot could not be generated.</p>
+                        {% endif %}
+                    </div>
+                    
+                    <div class="plot">
+                        <h2>Sentiment vs. Price Change Correlation</h2>
+                        {% if results.plot_correlation %}
+                            <img src="data:image/png;base64,{{ results.plot_correlation }}">
+                        {% else %}
+                            <p>Correlation plot could not be generated.</p>
+                        {% endif %}
+                    </div>
 
-# double-check both have 'date' column and are same dtype
-if "date" not in prices.columns or "date" not in daily_sentiment.columns:
-    st.error("Required 'date' column missing after normalization. Inspect input CSV and price data.")
-    st.write("prices.columns:", list(prices.columns))
-    st.write("daily_sentiment.columns:", list(daily_sentiment.columns))
-    st.stop()
+                    <h2>Recent Headlines & Sentiment</h2>
+                    {{ results.headlines_table | safe }}
+                </div>
+            {% endif %}
+        </main>
+    </div>
+</body>
+</html>
+"""
 
-# Merge safely now
-try:
-    merged = pd.merge(prices, daily_sentiment, on="date", how="left").sort_values("date")
-except Exception as e:
-    st.error("Error merging price and sentiment data:")
-    st.write(str(e))
-    st.write("prices.columns:", list(prices.columns))
-    st.write("prices.index.names:", prices.index.names)
-    st.write("daily_sentiment.columns:", list(daily_sentiment.columns))
-    st.write("daily_sentiment.index.names:", daily_sentiment.index.names)
-    st.stop()
+# --- Flask Routes ---
 
-# Fill sentiment gaps, compute returns
-merged["avg_score"] = merged.get("avg_score").fillna(method="ffill").fillna(0.0)
-if "count" in merged.columns:
-    merged["count"] = merged["count"].fillna(0).astype(int)
-else:
-    merged["count"] = 0
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        ticker = request.form['ticker'].upper()
+        if not ticker:
+            return render_template_string(HTML_TEMPLATE, error="Ticker symbol cannot be empty.")
+            
+        try:
+            # Run the analysis
+            df_price = fetch_stock_data(ticker)
+            df_news = fetch_headlines(ticker)
+            df_merged, correlation, df_headlines_sentiment = analyze_and_merge(df_price, df_news)
+            r2 = run_regression(df_merged)
+            plot_corr, plot_ts = create_plots(df_merged, ticker) # Unpack in correct order
+            
+            # Prepare results for template
+            results = {
+                'ticker': ticker,
+                'correlation': correlation,
+                'r2': r2,
+                'plot_correlation': plot_corr,
+                'plot_timeseries': plot_ts,
+                'headlines_table': df_headlines_sentiment.head(20).to_html(classes='table', index=False, float_format='{:.4f}'.format)
+            }
+            return render_template_string(HTML_TEMPLATE, results=results)
 
-merged["return"] = merged["close"].pct_change()
-merged["next_close"] = merged["close"].shift(-1)
-merged["next_return"] = (merged["next_close"] - merged["close"]) / merged["close"]
+        except Exception as e:
+            # Pass error to the template
+            return render_template_string(HTML_TEMPLATE, error=str(e))
 
-# -------------------------
-# Display headlines and charts
-# -------------------------
-st.markdown("### Headlines (sample)")
-st.dataframe(headlines_df.head(10))
+    # For GET request, just show the form
+    return render_template_string(HTML_TEMPLATE, results=None, error=None)
 
-# Price vs Sentiment - Plotly with two y-axes
-st.markdown("## Price vs Sentiment")
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=merged["date"], y=merged["close"], name="Close Price", mode="lines", yaxis="y"))
-fig.add_trace(go.Bar(x=merged["date"], y=merged["avg_score"], name="Daily Avg Sentiment (compound)", yaxis="y2", opacity=0.5))
-
-# add rolling sentiment
-rolling_window = 7
-merged["sent_roll"] = merged["avg_score"].rolling(window=rolling_window, min_periods=1).mean()
-fig.add_trace(go.Scatter(x=merged["date"], y=merged["sent_roll"], name=f"{rolling_window}-day rolling sentiment", yaxis="y2", mode="lines", line=dict(dash="dash")))
-
-fig.update_layout(
-    xaxis=dict(title="Date"),
-    yaxis=dict(title="Close Price", side="left"),
-    yaxis2=dict(title="Sentiment (compound)", overlaying="y", side="right", range=[-1,1]),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-)
-st.plotly_chart(fig, use_container_width=True)
-
-# Scatter: sentiment vs next-day return with regression
-st.markdown("## Sentiment vs Next-day Return (scatter + regression)")
-scatter_df = merged.dropna(subset=["avg_score", "next_return"]).copy()
-if scatter_df.empty:
-    st.write("Not enough data to compute next-day returns (need at least 2 price days).")
-else:
-    X = scatter_df["avg_score"].values.reshape(-1, 1)
-    y = scatter_df["next_return"].values.reshape(-1, 1)
-    lr = LinearRegression().fit(X, y)
-    slope = lr.coef_[0][0]
-    intercept = lr.intercept_[0]
-    x_line = np.linspace(scatter_df["avg_score"].min(), scatter_df["avg_score"].max(), 50)
-    y_line = intercept + slope * x_line
-
-    sc_fig = px.scatter(scatter_df, x="avg_score", y="next_return", hover_data=["date", "close"], labels={"avg_score": "Avg daily sentiment", "next_return": "Next-day return"})
-    sc_fig.add_traces(go.Line(x=x_line, y=y_line, name=f"LR fit (slope {slope:.4f})"))
-    sc_fig.update_layout(legend=dict(orientation="h"))
-    st.plotly_chart(sc_fig, use_container_width=True)
-
-    scatter_df["sent_bucket"] = pd.qcut(scatter_df["avg_score"].rank(method="first"), q=3, labels=["low", "mid", "high"])
-    stats = scatter_df.groupby("sent_bucket").agg(mean_next_return=("next_return", "mean"), median_next_return=("next_return", "median"), count=("next_return", "size")).reset_index()
-    st.markdown("### Next-day return by sentiment bucket")
-    st.dataframe(stats)
-
-# Correlation heatmap
-st.markdown("## Correlation heatmap")
-corr_cols = ["avg_score", "return", "next_return", "close", "Volume"]
-corr_df = merged[[c for c in corr_cols if c in merged.columns]].copy().dropna()
-if not corr_df.empty:
-    corr = corr_df.corr()
-    hm = px.imshow(corr, text_auto=True, aspect="auto", labels=dict(x="Metric", y="Metric", color="Correlation"))
-    st.plotly_chart(hm, use_container_width=True)
-else:
-    st.write("Not enough data to compute correlations.")
-
-# Merged data table and quick metrics
-st.markdown("## Merged data sample (prices + sentiment)")
-st.dataframe(merged.tail(60).reset_index(drop=True))
-
-st.markdown("## Quick metrics")
-corr_val = merged[["avg_score", "next_return"]].corr().iloc[0, 1]
-st.write(f"Pearson correlation (avg_score vs next-day return): **{corr_val:.4f}**")
-st.write(f"Average daily sentiment (mean): **{merged['avg_score'].mean():.4f}**, sample days used: **{len(merged)}**")
-
-st.markdown("---")
-st.markdown("**Notes:** VADER is rule-based and gives a compound score between -1 and 1. This demo is for exploration — not investment advice.")
+# --- Run the App ---
+if __name__ == "__main__":
+    # Get port from environment variable, default to 8080
+    port = int(os.environ.get("PORT", 8080))
+    # Run on 0.0.0.0 to be accessible externally (as required by Render)
+    app.run(host='0.0.0.0', port=port)
