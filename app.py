@@ -19,7 +19,6 @@ from flask import Flask, request, render_template_string
 
 # --- NLTK Setup ---
 # This will be run when the app starts.
-# On Render, you'll add this to your build command.
 try:
     nltk.data.find('sentiment/vader_lexicon.zip')
 except LookupError:
@@ -29,7 +28,7 @@ except LookupError:
 app = Flask(__name__)
 sia = SentimentIntensityAnalyzer()
 
-# --- Helper Functions (from your notebook) ---
+# --- Helper Functions ---
 
 def fetch_stock_data(ticker):
     """Fetches 1-year historical price data."""
@@ -43,17 +42,26 @@ def fetch_stock_data(ticker):
     return df_price
 
 def fetch_headlines(ticker):
-    """Scrapes news headlines from Finviz."""
+    """Scrapes news headlines from Finviz with robust error handling."""
     url = f"https://finviz.com/quote.ashx?t={ticker}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    response = requests.get(url, headers=headers)
-    response.raise_for_status() # Raise an error for bad responses
+    
+    # UPDATED: Added a 'User-Agent' to mimic a real browser and avoid 403 Forbidden errors
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status() # Raise error for bad status codes (404, 403, etc.)
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"Error connecting to Finviz: {e}")
+
     soup = BeautifulSoup(response.content, "html.parser")
     
     news_table = soup.find('table', class_='fullview-news-outer')
     data = []
     if not news_table:
-        raise ValueError(f"Could not find news table for {ticker}. Finviz layout may have changed.")
+        raise ValueError(f"Could not find news table for {ticker}. Finviz layout may have changed or ticker is invalid.")
         
     for row in news_table.find_all('tr'):
         cols = row.find_all('td')
@@ -62,27 +70,50 @@ def fetch_headlines(ticker):
             headline_tag = cols[1].a
             if headline_tag:
                 headline = headline_tag.text.strip()
+                
+                # Handle Finviz date format (e.g. "Dec-12-24 09:00AM" vs "09:00AM")
                 if " " in timestamp:
-                    date_str, time_str = timestamp.split(" ", 1) # Split only on first space
+                    # Split only on first space to separate Date from Time
+                    parts = timestamp.split(" ", 1)
+                    if len(parts) == 2:
+                        date_str, time_str = parts[0], parts[1]
+                    else:
+                        date_str, time_str = None, timestamp
                 else:
                     date_str, time_str = None, timestamp
+                    
                 data.append({"Date": date_str, "Time": time_str, "Headline": headline})
 
     if not data:
         raise ValueError(f"No headlines found for {ticker}.")
 
     df_news = pd.DataFrame(data)
-    df_news['Date'] = df_news['Date'].fillna(method='ffill')
-    df_news['Date'] = pd.to_datetime(df_news['Date'], format='%b-%d-%y').dt.date
+    
+    # UPDATED: Replaced deprecated fillna(method='ffill') with ffill()
+    df_news['Date'] = df_news['Date'].ffill()
+    
+    # Robust date conversion
+    try:
+        df_news['Date'] = pd.to_datetime(df_news['Date'], format='%b-%d-%y').dt.date
+    except ValueError:
+        # Fallback if format differs (e.g. "Today")
+        df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce').dt.date
+        
     return df_news
 
 def analyze_and_merge(df_price, df_news):
     """Performs sentiment analysis and merges with price data."""
+    # Calculate Compound Sentiment
     df_news['Sentiment'] = df_news['Headline'].apply(lambda x: sia.polarity_scores(x)['compound'])
+    
+    # Group by Date
     df_daily_sentiment = df_news.groupby('Date').agg({'Sentiment': 'mean'}).reset_index()
     
+    # Merge with Price
     df_merged = pd.merge(df_price, df_daily_sentiment, on='Date', how='left')
     df_merged['Sentiment'] = df_merged['Sentiment'].fillna(0)
+    
+    # Calculate Next Day Return
     df_merged['NextDay_PctChange'] = df_merged['Close'].pct_change().shift(-1)
     
     # Calculate correlation
@@ -98,12 +129,13 @@ def run_regression(df_merged):
     """Runs a simple linear regression and returns R2 score."""
     data = df_merged.dropna()
     if len(data) < 2:
-        return 0 # Not enough data to run regression
+        return 0 # Not enough data
         
     X = data[['Sentiment']]
     y = data['NextDay_PctChange']
     
-    if len(data) < 5: # Avoid splitting if too little data
+    # Split data only if we have enough points
+    if len(data) < 10:
         X_train, X_test, y_train, y_test = X, X, y, y
     else:
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -123,39 +155,49 @@ def create_plots(df_merged, ticker):
         data_for_plot = df_merged.dropna()
         if not data_for_plot.empty:
             fig1, ax1 = plt.subplots(figsize=(8, 6))
-            ax1.scatter(data_for_plot['Sentiment'], data_for_plot['NextDay_PctChange'], alpha=0.6)
+            ax1.scatter(data_for_plot['Sentiment'], data_for_plot['NextDay_PctChange'], alpha=0.6, color='#1a73e8')
             ax1.set_title(f"Sentiment vs. Next-Day % Change ({ticker})")
-            ax1.set_xlabel("Daily Sentiment Score")
+            ax1.set_xlabel("Daily Sentiment Score (-1 to +1)")
             ax1.set_ylabel("Next-Day % Price Change")
-            ax1.grid(True)
+            ax1.axhline(0, color='grey', linewidth=0.8, linestyle='--')
+            ax1.axvline(0, color='grey', linewidth=0.8, linestyle='--')
+            ax1.grid(True, alpha=0.3)
             
             buf1 = io.BytesIO()
-            fig1.savefig(buf1, format="png")
+            fig1.savefig(buf1, format="png", bbox_inches='tight')
             buf1.seek(0)
             plots_base64.append(base64.b64encode(buf1.read()).decode('ascii'))
             plt.close(fig1)
         else:
-            plots_base64.append(None) # Add placeholder if no data
+            plots_base64.append(None) 
     except Exception as e:
         print(f"Error creating plot 1: {e}")
         plots_base64.append(None)
 
     # --- Plot 2: Time Series Plot ---
     try:
-        fig2, ax2 = plt.subplots(figsize=(12, 6))
-        ax2.plot(df_merged['Date'], df_merged['Close'], label='Stock Price', linewidth=2)
-        # Scale sentiment to be visible with price
-        sentiment_scaled = df_merged['Sentiment'] * (df_merged['Close'].mean() * 0.1) + df_merged['Close'].mean()
-        ax2.plot(df_merged['Date'], sentiment_scaled, label='Sentiment (scaled & centered)', linestyle='--')
+        fig2, ax2 = plt.subplots(figsize=(10, 6))
         
-        ax2.set_title(f"{ticker} — Stock Price vs. News Sentiment")
-        ax2.set_xlabel("Date")
-        ax2.set_ylabel("Price / Scaled Sentiment")
-        ax2.legend()
-        ax2.grid(True)
+        # Plot Price on Left Axis
+        color = 'tab:blue'
+        ax2.set_xlabel('Date')
+        ax2.set_ylabel('Stock Price ($)', color=color)
+        ax2.plot(df_merged['Date'], df_merged['Close'], color=color, linewidth=2, label='Price')
+        ax2.tick_params(axis='y', labelcolor=color)
+        
+        # Create Right Axis for Sentiment
+        ax3 = ax2.twinx()  
+        color = 'tab:orange'
+        ax3.set_ylabel('Sentiment Score', color=color)
+        ax3.plot(df_merged['Date'], df_merged['Sentiment'], color=color, linestyle='--', alpha=0.5, label='Sentiment')
+        ax3.tick_params(axis='y', labelcolor=color)
+        ax3.set_ylim(-1, 1) # Fix sentiment range
+        
+        plt.title(f"{ticker} — Price vs. Sentiment Trend")
+        fig2.tight_layout()
         
         buf2 = io.BytesIO()
-        fig2.savefig(buf2, format="png")
+        fig2.savefig(buf2, format="png", bbox_inches='tight')
         buf2.seek(0)
         plots_base64.append(base64.b64encode(buf2.read()).decode('ascii'))
         plt.close(fig2)
@@ -185,15 +227,16 @@ HTML_TEMPLATE = """
         button { padding: 12px 20px; font-size: 1em; background-color: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; transition: background-color 0.3s; }
         button:hover { background-color: #185abc; }
         .results { border-top: 1px solid #e0e0e0; padding-top: 20px; }
-        h2 { color: #1a73e8; border-bottom: 2px solid #1a73e8; padding-bottom: 5px; }
+        h2 { color: #1a73e8; border-bottom: 2px solid #1a73e8; padding-bottom: 5px; margin-top: 40px; }
         .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; background: #f9f9f9; padding: 20px; border-radius: 4px; margin-bottom: 20px; }
         .stat p { margin: 0; font-size: 1.1em; color: #333; }
         .stat p strong { font-size: 1.4em; color: #185abc; display: block; margin-top: 4px; }
+        .plot { text-align: center; margin-bottom: 30px; }
         .plot img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; margin-top: 10px; }
         .error { background: #fdecea; color: #a94442; padding: 15px; border: 1px solid #f5c6cb; border-radius: 4px; }
-        table { border-collapse: collapse; width: 100%; margin-top: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        th, td { text-align: left; padding: 12px; border-bottom: 1px solid #ddd; }
-        th { background-color: #f4f7f6; }
+        table { border-collapse: collapse; width: 100%; margin-top: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); font-size: 0.9em; }
+        th, td { text-align: left; padding: 10px; border-bottom: 1px solid #ddd; }
+        th { background-color: #f4f7f6; font-weight: 600; }
         tr:nth-child(even) { background-color: #fdfdfd; }
         tr:hover { background-color: #f1f1f1; }
     </style>
@@ -202,11 +245,11 @@ HTML_TEMPLATE = """
     <div class="container">
         <header>
             <h1>Stock News Sentiment Analyzer</h1>
-            <p>Enter a stock ticker (e.g., AAPL, MSFT, GOOG) to analyze market sentiment.</p>
+            <p>Enter a stock ticker (e.g., AAPL, NVDA, TSLA) to analyze market sentiment.</p>
         </header>
         <main>
             <form action="/" method="POST">
-                <input type="text" name="ticker" placeholder="Enter Ticker Symbol" required>
+                <input type="text" name="ticker" placeholder="Enter Ticker Symbol (e.g. AAPL)" required>
                 <button type="submit">Analyze</button>
             </form>
 
@@ -218,23 +261,23 @@ HTML_TEMPLATE = """
 
             {% if results %}
                 <div class="results">
-                    <h2>Analysis for ${{ results.ticker }}</h2>
+                    <h2>Analysis for {{ results.ticker }}</h2>
                     
                     <div class="stats">
                         <div class="stat">
-                            <p>Correlation (Sentiment vs. Next-Day % Change)
+                            <p>Correlation (Sentiment vs. Price)
                                 <strong>{{ "%.4f"|format(results.correlation) }}</strong>
                             </p>
                         </div>
                         <div class="stat">
-                            <p>R² Score (Linear Regression)
+                            <p>Prediction Score (R²)
                                 <strong>{{ "%.4f"|format(results.r2) }}</strong>
                             </p>
                         </div>
                     </div>
 
                     <div class="plot">
-                        <h2>Price vs. Sentiment Time Series</h2>
+                        <h3>Price vs. Sentiment Trend</h3>
                         {% if results.plot_timeseries %}
                             <img src="data:image/png;base64,{{ results.plot_timeseries }}">
                         {% else %}
@@ -243,7 +286,7 @@ HTML_TEMPLATE = """
                     </div>
                     
                     <div class="plot">
-                        <h2>Sentiment vs. Price Change Correlation</h2>
+                        <h3>Correlation Analysis</h3>
                         {% if results.plot_correlation %}
                             <img src="data:image/png;base64,{{ results.plot_correlation }}">
                         {% else %}
@@ -251,8 +294,10 @@ HTML_TEMPLATE = """
                         {% endif %}
                     </div>
 
-                    <h2>Recent Headlines & Sentiment</h2>
-                    {{ results.headlines_table | safe }}
+                    <h2>Recent Headlines</h2>
+                    <div style="overflow-x: auto;">
+                        {{ results.headlines_table | safe }}
+                    </div>
                 </div>
             {% endif %}
         </main>
@@ -266,39 +311,41 @@ HTML_TEMPLATE = """
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
-        ticker = request.form['ticker'].upper()
+        ticker = request.form['ticker'].upper().strip()
         if not ticker:
             return render_template_string(HTML_TEMPLATE, error="Ticker symbol cannot be empty.")
             
         try:
-            # Run the analysis
+            # 1. Fetch Data
             df_price = fetch_stock_data(ticker)
             df_news = fetch_headlines(ticker)
-            df_merged, correlation, df_headlines_sentiment = analyze_and_merge(df_price, df_news)
-            r2 = run_regression(df_merged)
-            plot_corr, plot_ts = create_plots(df_merged, ticker) # Unpack in correct order
             
-            # Prepare results for template
+            # 2. Analyze
+            df_merged, correlation, df_headlines_sentiment = analyze_and_merge(df_price, df_news)
+            
+            # 3. Predict
+            r2 = run_regression(df_merged)
+            
+            # 4. Visualize
+            plot_corr, plot_ts = create_plots(df_merged, ticker)
+            
+            # 5. Render
             results = {
                 'ticker': ticker,
                 'correlation': correlation,
                 'r2': r2,
                 'plot_correlation': plot_corr,
                 'plot_timeseries': plot_ts,
-                'headlines_table': df_headlines_sentiment.head(20).to_html(classes='table', index=False, float_format='{:.4f}'.format)
+                'headlines_table': df_headlines_sentiment.head(15).to_html(classes='table', index=False, float_format='{:.4f}'.format)
             }
             return render_template_string(HTML_TEMPLATE, results=results)
 
         except Exception as e:
-            # Pass error to the template
             return render_template_string(HTML_TEMPLATE, error=str(e))
 
-    # For GET request, just show the form
     return render_template_string(HTML_TEMPLATE, results=None, error=None)
 
 # --- Run the App ---
 if __name__ == "__main__":
-    # Get port from environment variable, default to 8080
     port = int(os.environ.get("PORT", 8080))
-    # Run on 0.0.0.0 to be accessible externally (as required by Render)
     app.run(host='0.0.0.0', port=port)
