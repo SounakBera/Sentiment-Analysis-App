@@ -18,7 +18,6 @@ import base64
 from flask import Flask, request, render_template_string
 
 # --- NLTK Setup ---
-# This will be run when the app starts.
 try:
     nltk.data.find('sentiment/vader_lexicon.zip')
 except LookupError:
@@ -45,20 +44,20 @@ def fetch_headlines(ticker):
     """Scrapes news headlines from Finviz with robust error handling."""
     url = f"https://finviz.com/quote.ashx?t={ticker}"
     
-    # UPDATED: Added a 'User-Agent' to mimic a real browser and avoid 403 Forbidden errors
+    # User-Agent to mimic a real browser
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
     
     try:
         response = requests.get(url, headers=headers)
-        response.raise_for_status() # Raise error for bad status codes (404, 403, etc.)
+        response.raise_for_status() 
     except requests.exceptions.RequestException as e:
         raise ValueError(f"Error connecting to Finviz: {e}")
 
     soup = BeautifulSoup(response.content, "html.parser")
-    
     news_table = soup.find('table', class_='fullview-news-outer')
+    
     data = []
     if not news_table:
         raise ValueError(f"Could not find news table for {ticker}. Finviz layout may have changed or ticker is invalid.")
@@ -71,9 +70,8 @@ def fetch_headlines(ticker):
             if headline_tag:
                 headline = headline_tag.text.strip()
                 
-                # Handle Finviz date format (e.g. "Dec-12-24 09:00AM" vs "09:00AM")
+                # Handle Finviz date format
                 if " " in timestamp:
-                    # Split only on first space to separate Date from Time
                     parts = timestamp.split(" ", 1)
                     if len(parts) == 2:
                         date_str, time_str = parts[0], parts[1]
@@ -89,15 +87,17 @@ def fetch_headlines(ticker):
 
     df_news = pd.DataFrame(data)
     
-    # UPDATED: Replaced deprecated fillna(method='ffill') with ffill()
+    # Fill missing dates forward
     df_news['Date'] = df_news['Date'].ffill()
     
-    # Robust date conversion
+    # Convert dates and handle errors (creates NaT for bad dates)
     try:
         df_news['Date'] = pd.to_datetime(df_news['Date'], format='%b-%d-%y').dt.date
     except ValueError:
-        # Fallback if format differs (e.g. "Today")
         df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce').dt.date
+    
+    # UPDATED: Remove rows where Date is NaT (Not a Time)
+    df_news = df_news.dropna(subset=['Date'])
         
     return df_news
 
@@ -129,12 +129,11 @@ def run_regression(df_merged):
     """Runs a simple linear regression and returns R2 score."""
     data = df_merged.dropna()
     if len(data) < 2:
-        return 0 # Not enough data
+        return 0 
         
     X = data[['Sentiment']]
     y = data['NextDay_PctChange']
     
-    # Split data only if we have enough points
     if len(data) < 10:
         X_train, X_test, y_train, y_test = X, X, y, y
     else:
@@ -178,20 +177,18 @@ def create_plots(df_merged, ticker):
     try:
         fig2, ax2 = plt.subplots(figsize=(10, 6))
         
-        # Plot Price on Left Axis
         color = 'tab:blue'
         ax2.set_xlabel('Date')
         ax2.set_ylabel('Stock Price ($)', color=color)
         ax2.plot(df_merged['Date'], df_merged['Close'], color=color, linewidth=2, label='Price')
         ax2.tick_params(axis='y', labelcolor=color)
         
-        # Create Right Axis for Sentiment
         ax3 = ax2.twinx()  
         color = 'tab:orange'
         ax3.set_ylabel('Sentiment Score', color=color)
         ax3.plot(df_merged['Date'], df_merged['Sentiment'], color=color, linestyle='--', alpha=0.5, label='Sentiment')
         ax3.tick_params(axis='y', labelcolor=color)
-        ax3.set_ylim(-1, 1) # Fix sentiment range
+        ax3.set_ylim(-1, 1) 
         
         plt.title(f"{ticker} — Price vs. Sentiment Trend")
         fig2.tight_layout()
@@ -207,7 +204,7 @@ def create_plots(df_merged, ticker):
 
     return plots_base64
 
-# --- HTML Template String ---
+# --- HTML Template ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -306,8 +303,7 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# --- Flask Routes ---
-
+# --- Routes ---
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
@@ -316,20 +312,12 @@ def index():
             return render_template_string(HTML_TEMPLATE, error="Ticker symbol cannot be empty.")
             
         try:
-            # 1. Fetch Data
             df_price = fetch_stock_data(ticker)
             df_news = fetch_headlines(ticker)
-            
-            # 2. Analyze
             df_merged, correlation, df_headlines_sentiment = analyze_and_merge(df_price, df_news)
-            
-            # 3. Predict
             r2 = run_regression(df_merged)
-            
-            # 4. Visualize
             plot_corr, plot_ts = create_plots(df_merged, ticker)
             
-            # 5. Render
             results = {
                 'ticker': ticker,
                 'correlation': correlation,
@@ -345,7 +333,6 @@ def index():
 
     return render_template_string(HTML_TEMPLATE, results=None, error=None)
 
-# --- Run the App ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
