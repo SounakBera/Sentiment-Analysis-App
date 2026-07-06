@@ -1,6 +1,6 @@
 flask
 gunicorn
-pandas==1.5.3
+pandas
 numpy
 matplotlib
 requests
