@@ -87,7 +87,7 @@ def fetch_headlines(ticker):
 
     df_news = pd.DataFrame(data)
     
-    # Fill missing dates forward
+    # FIX: Modern pandas forward fill syntax replacing legacy .fillna(method='ffill')
     df_news['Date'] = df_news['Date'].ffill()
     
     # Convert dates and handle errors (creates NaT for bad dates)
@@ -96,7 +96,7 @@ def fetch_headlines(ticker):
     except ValueError:
         df_news['Date'] = pd.to_datetime(df_news['Date'], errors='coerce').dt.date
     
-    # UPDATED: Remove rows where Date is NaT (Not a Time)
+    # Remove rows where Date is NaT (Not a Time)
     df_news = df_news.dropna(subset=['Date'])
         
     return df_news
