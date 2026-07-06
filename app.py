@@ -204,101 +204,197 @@ def create_plots(df_merged, ticker):
 
     return plots_base64
 
-# --- HTML Template ---
+# --- HTML Template (Enhanced UI with Tailwind CSS) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="h-full bg-slate-50">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stock Sentiment Analyzer</title>
+    <title>PulseMarket // Sentiment Analyzer</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; background-color: #f4f7f6; color: #333; margin: 0; padding: 20px; }
-        .container { max-width: 900px; margin: 0 auto; background: #fff; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
-        header { padding: 30px; border-bottom: 1px solid #e0e0e0; text-align: center; }
-        header h1 { margin: 0; color: #1a73e8; }
-        header p { margin: 5px 0 0; font-size: 1.1em; color: #5f6368; }
-        main { padding: 30px; }
-        form { display: flex; gap: 10px; margin-bottom: 30px; }
-        input[type="text"] { flex-grow: 1; padding: 12px; font-size: 1em; border: 1px solid #ddd; border-radius: 4px; }
-        button { padding: 12px 20px; font-size: 1em; background-color: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer; transition: background-color 0.3s; }
-        button:hover { background-color: #185abc; }
-        .results { border-top: 1px solid #e0e0e0; padding-top: 20px; }
-        h2 { color: #1a73e8; border-bottom: 2px solid #1a73e8; padding-bottom: 5px; margin-top: 40px; }
-        .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; background: #f9f9f9; padding: 20px; border-radius: 4px; margin-bottom: 20px; }
-        .stat p { margin: 0; font-size: 1.1em; color: #333; }
-        .stat p strong { font-size: 1.4em; color: #185abc; display: block; margin-top: 4px; }
-        .plot { text-align: center; margin-bottom: 30px; }
-        .plot img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; margin-top: 10px; }
-        .error { background: #fdecea; color: #a94442; padding: 15px; border: 1px solid #f5c6cb; border-radius: 4px; }
-        table { border-collapse: collapse; width: 100%; margin-top: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); font-size: 0.9em; }
-        th, td { text-align: left; padding: 10px; border-bottom: 1px solid #ddd; }
-        th { background-color: #f4f7f6; font-weight: 600; }
-        tr:nth-child(even) { background-color: #fdfdfd; }
-        tr:hover { background-color: #f1f1f1; }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        
+        /* Custom scrollbar for data tables */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        /* Override the pandas default HTML table rendering to blend beautifully with Tailwind */
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.875rem;
+        }
+        .table th {
+            background-color: #f8fafc;
+            color: #475569;
+            font-weight: 600;
+            padding: 12px 16px;
+            border-bottom: 2px solid #e2e8f0;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.05em;
+        }
+        .table td {
+            padding: 12px 16px;
+            border-bottom: 1px solid #f1f5f9;
+            color: #334155;
+        }
+        .table tr:hover {
+            background-color: #f8fafc;
+        }
     </style>
 </head>
-<body>
-    <div class="container">
-        <header>
-            <h1>Stock News Sentiment Analyzer</h1>
-            <p>Enter a stock ticker (e.g., AAPL, NVDA, TSLA) to analyze market sentiment.</p>
-        </header>
-        <main>
-            <form action="/" method="POST">
-                <input type="text" name="ticker" placeholder="Enter Ticker Symbol (e.g. AAPL)" required>
-                <button type="submit">Analyze</button>
-            </form>
+<body class="flex flex-col min-h-screen text-slate-800">
 
-            {% if error %}
-                <div class="error">
-                    <strong>Error:</strong> {{ error }}
+    <nav class="bg-white border-b border-slate-200 sticky top-0 z-50 backdrop-blur-md bg-white/90">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16 items-center">
+                <div class="flex items-center gap-3">
+                    <div class="bg-blue-600 text-white p-2 rounded-xl shadow-md shadow-blue-200">
+                        <i class="fa-solid fa-chart-line text-lg"></i>
+                    </div>
+                    <span class="text-xl font-bold tracking-tight bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">PulseMarket</span>
                 </div>
-            {% endif %}
+                <div class="flex items-center gap-2 text-xs font-semibold text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Engine Active
+                </div>
+            </div>
+        </div>
+    </nav>
 
-            {% if results %}
-                <div class="results">
-                    <h2>Analysis for {{ results.ticker }}</h2>
-                    
-                    <div class="stats">
-                        <div class="stat">
-                            <p>Correlation (Sentiment vs. Price)
-                                <strong>{{ "%.4f"|format(results.correlation) }}</strong>
-                            </p>
+    <main class="flex-grow max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-10">
+        
+        <div class="bg-white rounded-2xl border border-slate-200 p-6 md:p-8 shadow-sm mb-8 transition-all hover:shadow-md">
+            <div class="max-w-2xl">
+                <h1 class="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight mb-2">Predictive Sentiment Terminal</h1>
+                <p class="text-slate-500 text-sm md:text-base mb-6">Scrapes real-time financial headlines, evaluates aggregate psychological movement using VADER lexicons, and cross-references data against shifting equity targets.</p>
+            </div>
+            
+            <form action="/" method="POST" class="flex flex-col sm:flex-row gap-3 max-w-xl">
+                <div class="relative flex-grow">
+                    <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
+                        <i class="fa-solid fa-magnifying-glass"></i>
+                    </div>
+                    <input type="text" name="ticker" placeholder="Enter stock symbol (e.g., AAPL, NVDA, TSLA)" required
+                           class="w-full pl-11 pr-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl font-medium placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:bg-white transition-all text-sm uppercase tracking-wider">
+                </div>
+                <button type="submit" class="bg-blue-600 hover:bg-blue-700 active:scale-95 text-white px-6 py-3.5 rounded-xl font-semibold text-sm transition-all shadow-lg shadow-blue-100 flex items-center justify-center gap-2 cursor-pointer">
+                    <span>Analyze Assets</span>
+                    <i class="fa-solid fa-arrow-right text-xs"></i>
+                </button>
+            </form>
+        </div>
+
+        {% if error %}
+            <div class="bg-red-50 border border-red-200 text-red-800 rounded-xl p-4 mb-8 flex items-start gap-3">
+                <i class="fa-solid fa-circle-exclamation text-lg mt-0.5 text-red-500"></i>
+                <div>
+                    <h4 class="font-semibold text-sm">Execution Interrupted</h4>
+                    <p class="text-xs text-red-600 mt-1">{{ error }}</p>
+                </div>
+            </div>
+        {% endif %}
+
+        {% if results %}
+            <div class="space-y-8">
+                
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-4">
+                    <div>
+                        <span class="text-xs font-bold uppercase tracking-widest text-blue-600 bg-blue-50 px-2.5 py-1 rounded-md">Analysis Target</span>
+                        <h2 class="text-3xl font-extrabold text-slate-900 mt-1">${{ results.ticker }} <span class="text-lg font-normal text-slate-400">Equity Dossier</span></h2>
+                    </div>
+                    <div class="text-xs text-slate-400 sm:text-right">
+                        <p><i class="fa-regular fa-clock mr-1"></i> Temporal Domain: 1 Year Historical Window</p>
+                    </div>
+                </div>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+                    <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
+                        <div>
+                            <p class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">Directional Correlation</p>
+                            <h3 class="text-3xl font-bold text-slate-800 tracking-tight">{{ "%.4f"|format(results.correlation) }}</h3>
+                            <p class="text-xs text-slate-500 mt-1">Sentiment vs Next-Day Value Swings</p>
                         </div>
-                        <div class="stat">
-                            <p>Prediction Score (R²)
-                                <strong>{{ "%.4f"|format(results.r2) }}</strong>
-                            </p>
+                        <div class="w-12 h-12 rounded-xl flex items-center justify-center text-xl {{ 'bg-emerald-50 text-emerald-600' if results.correlation >= 0 else 'bg-rose-50 text-rose-600' }}">
+                            <i class="fa-solid {{ 'fa-arrow-trend-up' if results.correlation >= 0 else 'fa-arrow-trend-down' }}"></i>
                         </div>
                     </div>
 
-                    <div class="plot">
-                        <h3>Price vs. Sentiment Trend</h3>
-                        {% if results.plot_timeseries %}
-                            <img src="data:image/png;base64,{{ results.plot_timeseries }}">
-                        {% else %}
-                            <p>Time series plot could not be generated.</p>
-                        {% endif %}
+                    <div class="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
+                        <div>
+                            <p class="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">Predictive Capacity Score (R²)</p>
+                            <h3 class="text-3xl font-bold text-slate-800 tracking-tight">{{ "%.4f"|format(results.r2) }}</h3>
+                            <p class="text-xs text-slate-500 mt-1">Variance explained via Linear Regression modeling</p>
+                        </div>
+                        <div class="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center text-xl">
+                            <i class="fa-solid fa-circle-nodes"></i>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div class="bg-white p-5 md:p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col">
+                        <div class="flex items-center gap-2 mb-4">
+                            <i class="fa-solid fa-chart-area text-slate-400 text-sm"></i>
+                            <h4 class="font-bold text-sm tracking-tight text-slate-700">Price & Sentiment Synchronization</h4>
+                        </div>
+                        <div class="bg-slate-50 border border-slate-100 rounded-xl p-2 flex items-center justify-center flex-grow min-h-[300px]">
+                            {% if results.plot_timeseries %}
+                                <img src="data:image/png;base64,{{ results.plot_timeseries }}" class="max-w-full h-auto object-contain rounded-lg">
+                            {% else %}
+                                <span class="text-xs text-slate-400 font-medium">Visualization asset generation fault encountered.</span>
+                            {% endif %}
+                        </div>
                     </div>
                     
-                    <div class="plot">
-                        <h3>Correlation Analysis</h3>
-                        {% if results.plot_correlation %}
-                            <img src="data:image/png;base64,{{ results.plot_correlation }}">
-                        {% else %}
-                            <p>Correlation plot could not be generated.</p>
-                        {% endif %}
+                    <div class="bg-white p-5 md:p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col">
+                        <div class="flex items-center gap-2 mb-4">
+                            <i class="fa-solid fa-chart-line text-slate-400 text-sm"></i>
+                            <h4 class="font-bold text-sm tracking-tight text-slate-700">Regression Distribution Mapping</h4>
+                        </div>
+                        <div class="bg-slate-50 border border-slate-100 rounded-xl p-2 flex items-center justify-center flex-grow min-h-[300px]">
+                            {% if results.plot_correlation %}
+                                <img src="data:image/png;base64,{{ results.plot_correlation }}" class="max-w-full h-auto object-contain rounded-lg">
+                            {% else %}
+                                <span class="text-xs text-slate-400 font-medium">Visualization asset generation fault encountered.</span>
+                            {% endif %}
+                        </div>
                     </div>
+                </div>
 
-                    <h2>Recent Headlines</h2>
-                    <div style="overflow-x: auto;">
+                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                    <div class="p-5 md:p-6 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+                        <div class="flex items-center gap-2">
+                            <i class="fa-regular fa-newspaper text-slate-400"></i>
+                            <h4 class="font-bold text-sm tracking-tight text-slate-700">Scraped Media Narrative Stream (VADER Vectorized)</h4>
+                        </div>
+                        <span class="text-xs font-semibold text-slate-500 bg-white border border-slate-200 px-2.5 py-1 rounded-md">Top 15 Headers</span>
+                    </div>
+                    <div class="overflow-x-auto">
                         {{ results.headlines_table | safe }}
                     </div>
                 </div>
-            {% endif %}
-        </main>
-    </div>
+                
+            </div>
+        {% endif %}
+    </main>
+
+    <footer class="bg-white border-t border-slate-200 mt-auto py-6">
+        <div class="max-w-7xl mx-auto px-4 text-center text-xs text-slate-400 font-medium flex flex-col sm:flex-row justify-between items-center gap-2">
+            <p>&copy; 2026 PulseMarket Terminal. Deployed via Gunicorn engine environments.</p>
+            <div class="flex gap-4 text-slate-400">
+                <span class="hover:text-slate-600 transition-colors cursor-pointer">Security Protocol Documentation</span>
+                <span class="hover:text-slate-600 transition-colors cursor-pointer">REST Core Sandbox API</span>
+            </div>
+        </div>
+    </footer>
 </body>
 </html>
 """
